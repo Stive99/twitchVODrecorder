@@ -1,0 +1,16 @@
+﻿services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: twitch-vod-recorder
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data/streams
+    volumes:
+      - streams_data:/data/streams
+
+volumes:
+  streams_data:

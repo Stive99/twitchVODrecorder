@@ -1,4 +1,4 @@
-type LogLevel = "debug" | "info" | "warn" | "error";
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 type LogMeta = Record<string, unknown> | undefined;
 
@@ -6,41 +6,41 @@ const levelWeight: Record<LogLevel, number> = {
 	debug: 10,
 	info: 20,
 	warn: 30,
-	error: 40,
+	error: 40
 };
 
 const levelStyles: Record<LogLevel, { label: string; color: string }> = {
-	debug: { label: "DEBUG", color: "\x1b[36m" },
-	info: { label: "INFO ", color: "\x1b[32m" },
-	warn: { label: "WARN ", color: "\x1b[33m" },
-	error: { label: "ERROR", color: "\x1b[31m" },
+	debug: { label: 'DEBUG', color: '\x1b[36m' },
+	info: { label: 'INFO ', color: '\x1b[32m' },
+	warn: { label: 'WARN ', color: '\x1b[33m' },
+	error: { label: 'ERROR', color: '\x1b[31m' }
 };
 
-const resetColor = "\x1b[0m";
+const resetColor = '\x1b[0m';
 
 function resolveMinLevel(): LogLevel {
 	const raw = process.env.LOG_LEVEL?.trim().toLowerCase();
-	if (raw === "debug" || raw === "info" || raw === "warn" || raw === "error") {
+	if (raw === 'debug' || raw === 'info' || raw === 'warn' || raw === 'error') {
 		return raw;
 	}
-	return "info";
+	return 'info';
 }
 
 const minLevel = resolveMinLevel();
 
 function formatTime(date: Date): string {
-	return date.toISOString().replace("T", " ").slice(0, 19);
+	return date.toISOString().replace('T', ' ').slice(0, 19);
 }
 
 function stringifyMeta(meta: LogMeta): string {
 	if (!meta) {
-		return "";
+		return '';
 	}
 
 	try {
 		return ` ${JSON.stringify(meta)}`;
 	} catch {
-		return " [unserializable-meta]";
+		return ' [unserializable-meta]';
 	}
 }
 
@@ -52,19 +52,19 @@ export class Logger {
 	}
 
 	debug(message: string, meta?: LogMeta): void {
-		this.write("debug", message, meta);
+		this.write('debug', message, meta);
 	}
 
 	info(message: string, meta?: LogMeta): void {
-		this.write("info", message, meta);
+		this.write('info', message, meta);
 	}
 
 	warn(message: string, meta?: LogMeta): void {
-		this.write("warn", message, meta);
+		this.write('warn', message, meta);
 	}
 
 	error(message: string, meta?: LogMeta): void {
-		this.write("error", message, meta);
+		this.write('error', message, meta);
 	}
 
 	private write(level: LogLevel, message: string, meta?: LogMeta): void {
@@ -74,14 +74,14 @@ export class Logger {
 
 		const style = levelStyles[level];
 		const time = formatTime(new Date());
-		const scope = this.context ? ` [${this.context}]` : "";
+		const scope = this.context ? ` [${this.context}]` : '';
 		const text = `${style.color}${style.label}${resetColor} ${time}${scope} ${message}${stringifyMeta(meta)}`;
 
-		if (level === "error") {
+		if (level === 'error') {
 			console.error(text);
 			return;
 		}
-		if (level === "warn") {
+		if (level === 'warn') {
 			console.warn(text);
 			return;
 		}
@@ -89,4 +89,4 @@ export class Logger {
 	}
 }
 
-export const logger = new Logger("app");
+export const logger = new Logger('app');

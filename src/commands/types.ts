@@ -1,9 +1,10 @@
-﻿import type { Bot, Context } from "grammy";
+﻿import type { Bot, Context } from 'grammy';
 
 export interface CommandDependencies {
 	startVodJob: (
 		url: string,
 		requestedByChatId: number,
+		options?: { startAfter?: Promise<unknown> }
 	) => Promise<{ jobId: string }>;
 	getStatusText: () => string;
 	getKnownChatsText: () => string;
@@ -27,7 +28,7 @@ function extractArgs(ctx: Context): string[] {
 
 export function registerCommands(bot: Bot, commands: BotCommand[]): void {
 	for (const command of commands) {
-		bot.command(command.name, async (ctx) => {
+		bot.command(command.name, async ctx => {
 			await command.execute(ctx, extractArgs(ctx));
 		});
 	}

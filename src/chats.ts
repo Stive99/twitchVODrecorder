@@ -1,4 +1,4 @@
-﻿import type { Chat } from "grammy/types";
+﻿import type { Chat } from 'grammy/types';
 
 interface KnownChat {
 	id: number;
@@ -7,7 +7,7 @@ interface KnownChat {
 	lastSeenAt: string;
 }
 
-const dataDir = process.env.DATA_DIR ?? "/data/streams";
+const dataDir = process.env.DATA_DIR ?? '/data/streams';
 const storagePath = `${dataDir}/known-chats.json`;
 const knownChats = new Map<number, KnownChat>();
 let initialized = false;
@@ -39,42 +39,48 @@ export async function initKnownChats(): Promise<void> {
 	}
 }
 
-function chatTitle(chat: Chat): string {
+function chatTitle(
+	chat: Pick<Chat, 'id' | 'type'> &
+		Partial<Pick<Chat, 'title' | 'username' | 'first_name' | 'last_name'>>
+): string {
 	if (
-		"title" in chat &&
-		typeof chat.title === "string" &&
+		'title' in chat &&
+		typeof chat.title === 'string' &&
 		chat.title.trim().length > 0
 	) {
 		return chat.title;
 	}
 
 	if (
-		"username" in chat &&
-		typeof chat.username === "string" &&
+		'username' in chat &&
+		typeof chat.username === 'string' &&
 		chat.username.trim().length > 0
 	) {
 		return `@${chat.username}`;
 	}
 
-	if (chat.type === "private" && "first_name" in chat) {
+	if (chat.type === 'private' && 'first_name' in chat) {
 		const first =
-			typeof chat.first_name === "string" ? chat.first_name : "Private";
+			typeof chat.first_name === 'string' ? chat.first_name : 'Private';
 		const last =
-			"last_name" in chat && typeof chat.last_name === "string"
+			'last_name' in chat && typeof chat.last_name === 'string'
 				? ` ${chat.last_name}`
-				: "";
+				: '';
 		return `${first}${last}`.trim();
 	}
 
 	return `Chat ${chat.id}`;
 }
 
-export async function rememberChat(chat: Chat): Promise<void> {
+export async function rememberChat(
+	chat: Pick<Chat, 'id' | 'type'> &
+		Partial<Pick<Chat, 'title' | 'username' | 'first_name' | 'last_name'>>
+): Promise<void> {
 	const item: KnownChat = {
 		id: chat.id,
 		type: chat.type,
 		title: chatTitle(chat),
-		lastSeenAt: new Date().toISOString(),
+		lastSeenAt: new Date().toISOString()
 	};
 
 	knownChats.set(chat.id, item);
@@ -90,11 +96,11 @@ export async function rememberChat(chat: Chat): Promise<void> {
 export function getKnownChatsText(): string {
 	const chats = Array.from(knownChats.values()).sort((a, b) => b.id - a.id);
 	if (chats.length === 0) {
-		return "Пока нет чатов/каналов в памяти. Добавьте бота в канал или отправьте сообщение.";
+		return 'Пока нет чатов/каналов в памяти. Добавьте бота в канал или отправьте сообщение.';
 	}
 
 	const lines = chats.map(
-		(chat) => `${chat.title} | id=${chat.id} | type=${chat.type}`,
+		chat => `${chat.title} | id=${chat.id} | type=${chat.type}`
 	);
-	return ["Чаты/каналы бота:", ...lines].join("\n");
+	return ['Чаты/каналы бота:', ...lines].join('\n');
 }

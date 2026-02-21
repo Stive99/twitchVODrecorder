@@ -1,8 +1,8 @@
 ﻿# Twitch VOD Recorder Bot
 
 <p align="right">
-	<a href="./README.md">🇺🇸 English</a> |
-	<a href="./README.ru.md">🇷🇺 Русский</a>
+	<a href="./README.md">EN English</a> |
+	<a href="./README.ru.md">RU Русский</a><br/>
 </p>
 
 Telegram-бот для скачивания Twitch VOD/клипов, нарезки видео на части и загрузки результатов в Telegram.
@@ -87,6 +87,10 @@ bun run dev
 | `VOD_SEGMENT_SECONDS` | Нет | Длина сегмента в секундах (по умолчанию: `2400`) |
 | `YTDLP_BIN` | Нет | Имя/путь к бинарнику downloader |
 | `BOT_API_ROOT` | Нет | Кастомный endpoint Telegram Bot API |
+| `BOT_API_RETRY_MAX_ATTEMPTS` | Нет | Количество повторов Telegram API при временных ошибках (по умолчанию: `4`) |
+| `BOT_API_MAX_CONCURRENT` | Нет | Максимум одновременных запросов к Telegram API в throttler (по умолчанию: `8`) |
+| `BOT_RATE_LIMIT_WINDOW_MS` | Нет | Окно rate-limit для запросов пользователя в миллисекундах (по умолчанию: `60000`) |
+| `BOT_RATE_LIMIT_REQUESTS` | Нет | Максимум запросов за окно для пользователя/чата (по умолчанию: `5`) |
 
 ## Команды бота
 

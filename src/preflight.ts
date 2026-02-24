@@ -1,4 +1,4 @@
-import { access, mkdir, rm, writeFile } from 'node:fs/promises';
+﻿import { access, mkdir, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -84,6 +84,8 @@ export async function runStartupPreflight(
 	await assertExecutableAvailable('ffmpeg', ['ffmpeg']);
 
 	assertPositiveNumberEnv('VOD_SEGMENT_SECONDS');
+	assertPositiveNumberEnv('BOT_API_RETRY_MAX_ATTEMPTS');
+	assertPositiveNumberEnv('BOT_API_MAX_CONCURRENT');
 	assertPositiveNumberEnv('BOT_RATE_LIMIT_WINDOW_MS');
 	assertPositiveNumberEnv('BOT_RATE_LIMIT_REQUESTS');
 

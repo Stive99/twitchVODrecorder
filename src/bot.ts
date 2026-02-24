@@ -1,4 +1,4 @@
-﻿import { limit } from '@grammyjs/ratelimiter';
+import { limit } from '@grammyjs/ratelimiter';
 import { run } from '@grammyjs/runner';
 import type { Context } from 'grammy';
 import { getKnownChatsText, initKnownChats, rememberChat } from './chats';

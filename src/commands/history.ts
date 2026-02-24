@@ -42,9 +42,9 @@ export function createHistoryCommand(): BotCommand {
 			const lines = rows.map((row, index) => {
 				const title = row.streamTitle?.trim() || row.jobId;
 				const errorText = row.errorText
-					? ` | ошибка: ${shorten(row.errorText)}`
+					? ` | Ошибка: ${shorten(row.errorText)}`
 					: '';
-				return `${index + 1}. [${row.status}] ${title}\nобновлено: ${formatTs(row.updatedAt)} | завершено: ${formatTs(row.completedAt)}${errorText}`;
+				return `${index + 1}. [${row.status}] ${title}\nОбновлено: ${formatTs(row.updatedAt)} | Завершено: ${formatTs(row.completedAt)}${errorText}`;
 			});
 
 			await ctx.reply(['История загрузок:', ...lines].join('\n\n'));

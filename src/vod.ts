@@ -1,4 +1,4 @@
-﻿import { rm, stat } from 'node:fs/promises';
+﻿import { rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'bun';
 import { bot, DEFAULT_TARGET_CHAT_ID } from './config';
 import {
@@ -7,7 +7,13 @@ import {
 	updateUploadHistoryStatus
 } from './history';
 import { logger } from './logger';
-import { type UploadMetadata, uploadChunks } from './upload';
+import {
+	ChunkTooLargeError,
+	type UploadMetadata,
+	type UploadProgress,
+	resolveTelegramUploadLimitBytes,
+	uploadChunks
+} from './upload';
 
 const log = logger.init('vod');
 
@@ -20,6 +26,8 @@ type JobState =
 	| 'done'
 	| 'error';
 
+type SliceMode = 'copy' | 'reencode';
+
 interface VodJob {
 	id: string;
 	url: string;
@@ -31,7 +39,11 @@ interface VodJob {
 	updatedAt: number;
 	statusMessageId?: number;
 	lastStatusText?: string;
+	lastStatusSentAt?: number;
+	lastNotifiedState?: JobState;
+	lastNotifiedProgress?: number;
 	error?: string;
+	publishSummary?: string;
 }
 
 interface EnqueueVodOptions {
@@ -56,9 +68,13 @@ interface YtInfo {
 }
 
 const dataDir = process.env.DATA_DIR ?? '/data/streams';
-const segmentSeconds = Number(process.env.VOD_SEGMENT_SECONDS ?? 2400);
-const telegramUploadLimitMb = 1900;
+const segmentSeconds = 2400;
+const telegramUploadLimitBytes = resolveTelegramUploadLimitBytes();
+const minSegmentSeconds = 1;
+const maxAdaptiveSliceAttempts = 10;
 const cleanupDelayMs = 15000;
+const statusUpdateMinIntervalMs = Number(process.env.STATUS_UPDATE_MIN_INTERVAL_MS ?? 1200);
+const vodMetadataFileName = 'vod-metadata.json';
 const jobs = new Map<string, VodJob>();
 let activeQueue = Promise.resolve();
 
@@ -231,8 +247,8 @@ function resolveSegmentSecondsBySize(
 		durationSeconds <= 0 ||
 		!Number.isFinite(sourceSizeBytes) ||
 		sourceSizeBytes <= 0 ||
-		!Number.isFinite(telegramUploadLimitMb) ||
-		telegramUploadLimitMb <= 0
+		!Number.isFinite(telegramUploadLimitBytes) ||
+		telegramUploadLimitBytes <= 0
 	) {
 		return segmentSeconds;
 	}
@@ -242,13 +258,174 @@ function resolveSegmentSecondsBySize(
 		return segmentSeconds;
 	}
 
-	const targetBytes = Math.floor(telegramUploadLimitMb * 1024 * 1024 * 0.92);
+	const targetBytes = Math.floor(telegramUploadLimitBytes * 0.92);
 	const bySize = Math.floor(targetBytes / bytesPerSecond);
 	if (!Number.isFinite(bySize) || bySize <= 0) {
 		return segmentSeconds;
 	}
 
-	return Math.max(30, Math.min(segmentSeconds, bySize));
+	return Math.max(resolveMinSegmentSeconds(), Math.min(segmentSeconds, bySize));
+}
+
+function resolveMinSegmentSeconds(): number {
+	if (!Number.isFinite(minSegmentSeconds) || minSegmentSeconds < 1) {
+		return 1;
+	}
+	return Math.floor(minSegmentSeconds);
+}
+
+function resolveMaxAdaptiveSliceAttempts(): number {
+	if (!Number.isFinite(maxAdaptiveSliceAttempts) || maxAdaptiveSliceAttempts < 1) {
+		return 5;
+	}
+	return Math.floor(maxAdaptiveSliceAttempts);
+}
+
+function resolveTargetChunkBytes(): number {
+	return Math.floor(telegramUploadLimitBytes * 0.92);
+}
+
+interface ChunkInspection {
+	count: number;
+	largestPath: string;
+	largestSizeBytes: number;
+	oversizedPath?: string;
+	oversizedSizeBytes?: number;
+}
+
+async function inspectGeneratedChunks(
+	workDir: string,
+	chunkBaseName: string,
+	uploadLimitBytes: number
+): Promise<ChunkInspection> {
+	let count = 0;
+	let largestPath = '';
+	let largestSizeBytes = 0;
+	let oversizedPath: string | undefined;
+	let oversizedSizeBytes: number | undefined;
+
+	for await (const name of new Bun.Glob(`${chunkBaseName}_*.mp4`).scan({
+		cwd: workDir
+	})) {
+		const fullPath = `${workDir}/${name}`;
+		const info = await stat(fullPath);
+		count += 1;
+		if (info.size > largestSizeBytes) {
+			largestSizeBytes = info.size;
+			largestPath = fullPath;
+		}
+		if (!oversizedPath && info.size > uploadLimitBytes) {
+			oversizedPath = fullPath;
+			oversizedSizeBytes = info.size;
+		}
+	}
+
+	if (count === 0) {
+		throw new Error('Chunk files were not generated after slicing');
+	}
+
+	return {
+		count,
+		largestPath,
+		largestSizeBytes,
+		oversizedPath,
+		oversizedSizeBytes
+	};
+}
+
+function resolveNextSegmentSeconds(
+	currentSegmentSeconds: number,
+	overSizedChunkBytes?: number
+): number {
+	const minSeconds = resolveMinSegmentSeconds();
+	const fallback = Math.floor(currentSegmentSeconds * 0.7);
+
+	let byRatio = 0;
+	if (
+		typeof overSizedChunkBytes === 'number' &&
+		Number.isFinite(overSizedChunkBytes) &&
+		overSizedChunkBytes > 0
+	) {
+		const targetBytes = resolveTargetChunkBytes();
+		byRatio = Math.floor(currentSegmentSeconds * (targetBytes / overSizedChunkBytes) * 0.9);
+	}
+
+	const candidate = byRatio > 0 ? byRatio : fallback;
+	return Math.max(minSeconds, Math.min(currentSegmentSeconds - 1, candidate));
+}
+
+function buildSliceCommand(
+	sourceFile: string,
+	chunksPattern: string,
+	effectiveSegmentSeconds: number,
+	mode: SliceMode
+): string[] {
+	if (mode === 'reencode') {
+		return [
+			'ffmpeg',
+			'-y',
+			'-i',
+			sourceFile,
+			'-map',
+			'0:v:0',
+			'-map',
+			'0:a:0?',
+			'-c:v',
+			'libx264',
+			'-preset',
+			'veryfast',
+			'-crf',
+			'23',
+			'-c:a',
+			'aac',
+			'-b:a',
+			'128k',
+			'-force_key_frames',
+			`expr:gte(t,n_forced*${effectiveSegmentSeconds})`,
+			'-f',
+			'segment',
+			'-segment_format_options',
+			'movflags=+faststart',
+			'-segment_time',
+			String(effectiveSegmentSeconds),
+			'-reset_timestamps',
+			'1',
+			chunksPattern
+		];
+	}
+
+	return [
+		'ffmpeg',
+		'-y',
+		'-i',
+		sourceFile,
+		'-c',
+		'copy',
+		'-map',
+		'0',
+		'-f',
+		'segment',
+		'-segment_format_options',
+		'movflags=+faststart',
+		'-segment_time',
+		String(effectiveSegmentSeconds),
+		'-reset_timestamps',
+		'1',
+		'-break_non_keyframes',
+		'1',
+		chunksPattern
+	];
+}
+
+async function removeGeneratedChunks(
+	workDir: string,
+	chunkBaseName: string
+): Promise<void> {
+	for await (const name of new Bun.Glob(`${chunkBaseName}_*.mp4`).scan({
+		cwd: workDir
+	})) {
+		await rm(`${workDir}/${name}`, { force: true });
+	}
 }
 
 function isNumericOnly(value: string): boolean {
@@ -356,7 +533,7 @@ function setState(
 		job.progress = Math.max(job.progress, 1);
 		return;
 	}
-	job.progress = progressForState(state);
+	job.progress = defaultProgressForState(state);
 }
 
 function stateLabel(state: JobState): string {
@@ -380,18 +557,47 @@ function stateLabel(state: JobState): string {
 	}
 }
 
-function progressForState(state: JobState): number {
+function defaultProgressForState(state: JobState): number {
 	switch (state) {
 		case 'queued':
-			return 5;
+			return 0;
 		case 'metadata':
-			return 20;
+			return 8;
 		case 'downloading':
-			return 45;
+			return 12;
 		case 'slicing':
 			return 70;
 		case 'uploading':
-			return 85;
+			return 84;
+		case 'done':
+			return 100;
+		case 'error':
+			return 0;
+		default:
+			return 0;
+	}
+}
+
+function clampRatio(value: number): number {
+	if (!Number.isFinite(value)) {
+		return 0;
+	}
+	return Math.max(0, Math.min(1, value));
+}
+
+function progressWithinStage(state: JobState, ratio: number): number {
+	const normalized = clampRatio(ratio);
+	switch (state) {
+		case 'queued':
+			return Math.floor(normalized * 7);
+		case 'metadata':
+			return 8 + Math.floor(normalized * 4);
+		case 'downloading':
+			return 12 + Math.floor(normalized * 58);
+		case 'slicing':
+			return 70 + Math.floor(normalized * 14);
+		case 'uploading':
+			return 84 + Math.floor(normalized * 15);
 		case 'done':
 			return 100;
 		case 'error':
@@ -403,6 +609,17 @@ function progressForState(state: JobState): number {
 
 function clampPercent(value: number): number {
 	return Math.max(0, Math.min(100, Math.floor(value)));
+}
+
+function formatBytes(value: number): string {
+	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+	let size = value;
+	let idx = 0;
+	while (size >= 1024 && idx < units.length - 1) {
+		size /= 1024;
+		idx += 1;
+	}
+	return `${size.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
 }
 
 function stateIcon(state: JobState): string {
@@ -463,6 +680,9 @@ function buildStatusText(job: VodJob): string {
 	if (job.error) {
 		lines.push('', `Ошибка: ${job.error}`);
 	}
+	if (job.publishSummary) {
+		lines.push('', `Публикация: ${job.publishSummary}`);
+	}
 	return lines.join('\n');
 }
 
@@ -472,17 +692,40 @@ async function setStateAndNotify(
 	error?: string,
 	progress?: number
 ): Promise<void> {
+	const prevState = job.state;
+	const prevProgress = job.progress;
+	const prevError = job.error;
 	setState(job, state, error, progress);
+	const stateChanged = prevState !== job.state;
+	const progressChanged = prevProgress !== job.progress;
+	const errorChanged = prevError !== job.error;
+	if (!stateChanged && !progressChanged && !errorChanged && job.statusMessageId) {
+		return;
+	}
+
+	const isTerminal = state === 'done' || state === 'error';
+	const notifiedStateChanged = job.lastNotifiedState !== state;
+	const progressDelta = Math.abs(job.progress - (job.lastNotifiedProgress ?? 0));
+	const minInterval = Number.isFinite(statusUpdateMinIntervalMs) && statusUpdateMinIntervalMs >= 0
+		? Math.floor(statusUpdateMinIntervalMs)
+		: 1200;
+	if (!isTerminal && !notifiedStateChanged) {
+		const elapsed = Date.now() - (job.lastStatusSentAt ?? 0);
+		if (elapsed < minInterval && progressDelta < 2) {
+			return;
+		}
+	}
+
+	const text = buildStatusText(job);
+	if (text === job.lastStatusText) {
+		return;
+	}
 	log.info('Job state updated', {
 		jobId: job.id,
 		state,
 		progress: job.progress,
 		hasError: Boolean(error)
 	});
-	const text = buildStatusText(job);
-	if (text === job.lastStatusText) {
-		return;
-	}
 
 	try {
 		if (job.statusMessageId) {
@@ -492,6 +735,9 @@ async function setStateAndNotify(
 			job.statusMessageId = message.message_id;
 		}
 		job.lastStatusText = text;
+		job.lastStatusSentAt = Date.now();
+		job.lastNotifiedState = state;
+		job.lastNotifiedProgress = job.progress;
 	} catch (notifyError) {
 		const errorText = formatUnknownError(notifyError);
 		if (errorText.includes('message is not modified')) {
@@ -502,7 +748,171 @@ async function setStateAndNotify(
 			error: errorText
 		});
 		await notifyJobStatus(job.requestedByChatId, text);
+		job.lastStatusSentAt = Date.now();
+		job.lastNotifiedState = state;
+		job.lastNotifiedProgress = job.progress;
 	}
+}
+
+function parseDownloadPercent(line: string): number | undefined {
+	const match = line.match(/(\d{1,3}(?:\.\d+)?)%/);
+	if (!match?.[1]) {
+		return undefined;
+	}
+	const parsed = Number.parseFloat(match[1]);
+	if (!Number.isFinite(parsed)) {
+		return undefined;
+	}
+	return Math.max(0, Math.min(100, parsed));
+}
+
+function parseHmsToSeconds(value: string): number | undefined {
+	const match = value.match(/^(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)$/);
+	if (!match) {
+		return undefined;
+	}
+	const hours = Number.parseInt(match[1] ?? '0', 10);
+	const minutes = Number.parseInt(match[2] ?? '0', 10);
+	const seconds = Number.parseFloat(match[3] ?? '0');
+	if (!Number.isFinite(hours) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) {
+		return undefined;
+	}
+	return hours * 3600 + minutes * 60 + seconds;
+}
+
+function parseSliceProgressRatio(line: string, durationSeconds?: number): number | undefined {
+	if (!durationSeconds || durationSeconds <= 0) {
+		return undefined;
+	}
+	const match = line.match(/time=(\d{2}:\d{2}:\d{2}(?:\.\d+)?)/);
+	if (!match?.[1]) {
+		return undefined;
+	}
+	const currentSeconds = parseHmsToSeconds(match[1]);
+	if (typeof currentSeconds !== 'number' || currentSeconds < 0) {
+		return undefined;
+	}
+	return clampRatio(currentSeconds / durationSeconds);
+}
+
+async function readStreamLines(
+	stream: ReadableStream<Uint8Array> | null,
+	onLine: (line: string) => Promise<void> | void
+): Promise<void> {
+	if (!stream) {
+		return;
+	}
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	let buffer = '';
+	try {
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) {
+				break;
+			}
+			buffer += decoder.decode(value, { stream: true });
+			for (;;) {
+				const lineBreakIndex = buffer.search(/[\r\n]/);
+				if (lineBreakIndex === -1) {
+					break;
+				}
+				const line = buffer.slice(0, lineBreakIndex).trim();
+				buffer = buffer.slice(lineBreakIndex + 1);
+				if (line.length > 0) {
+					await onLine(line);
+				}
+			}
+		}
+		buffer += decoder.decode();
+		const tail = buffer.trim();
+		if (tail.length > 0) {
+			await onLine(tail);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+}
+
+async function downloadVodWithProgress(
+	job: VodJob,
+	sourceFile: string
+): Promise<void> {
+	const args = [
+		downloaderBinary,
+		'--no-warnings',
+		'--newline',
+		'--progress',
+		'-f',
+		'best[ext=mp4]/best',
+		'-o',
+		sourceFile,
+		job.url
+	];
+	const proc = spawn(args, { stdio: ['ignore', 'pipe', 'pipe'] });
+	let lastPercent = 0;
+	let stderrText = '';
+	const stdoutTask = readStreamLines(proc.stdout, async line => {
+		const percent = parseDownloadPercent(line);
+		if (typeof percent !== 'number') {
+			return;
+		}
+		if (percent <= lastPercent) {
+			return;
+		}
+		lastPercent = percent;
+		await setStateAndNotify(
+			job,
+			'downloading',
+			undefined,
+			progressWithinStage('downloading', percent / 100)
+		);
+	});
+	const stderrTask = readStreamLines(proc.stderr, line => {
+		stderrText = `${stderrText}\n${line}`.trim().slice(-4000);
+	});
+	const exitCode = await proc.exited;
+	await Promise.all([stdoutTask, stderrTask]);
+	if (exitCode !== 0) {
+		throw new Error(
+			`download failed (${downloaderBinary} exit ${exitCode}): ${trimOutput(stderrText || 'no output')}`
+		);
+	}
+	await setStateAndNotify(job, 'downloading', undefined, progressWithinStage('downloading', 1));
+}
+
+async function sliceChunksWithProgress(
+	sourceFile: string,
+	chunksPattern: string,
+	effectiveSegmentSeconds: number,
+	mode: SliceMode,
+	durationSeconds: number | undefined,
+	onProgress: (ratio: number) => Promise<void>
+): Promise<void> {
+	const args = buildSliceCommand(sourceFile, chunksPattern, effectiveSegmentSeconds, mode);
+	const proc = spawn(args, { stdio: ['ignore', 'pipe', 'pipe'] });
+	let stderrText = '';
+	let lastRatio = 0;
+	const stdoutTask = new Response(proc.stdout).text();
+	const stderrTask = readStreamLines(proc.stderr, async line => {
+		stderrText = `${stderrText}\n${line}`.trim().slice(-4000);
+		const ratio = parseSliceProgressRatio(line, durationSeconds);
+		if (typeof ratio !== 'number') {
+			return;
+		}
+		if (ratio <= lastRatio) {
+			return;
+		}
+		lastRatio = ratio;
+		await onProgress(ratio);
+	});
+
+	const exitCode = await proc.exited;
+	await Promise.all([stdoutTask, stderrTask]);
+	if (exitCode !== 0) {
+		throw new Error(`slicing failed (ffmpeg exit ${exitCode}): ${trimOutput(stderrText || 'no output')}`);
+	}
+	await onProgress(1);
 }
 
 async function loadVodMetadata(url: string): Promise<UploadMetadata> {
@@ -553,6 +963,13 @@ async function loadVodMetadata(url: string): Promise<UploadMetadata> {
 	};
 }
 
+async function saveVodMetadataSnapshot(
+	workDir: string,
+	metadata: UploadMetadata
+): Promise<void> {
+	const metadataPath = `${workDir}/${vodMetadataFileName}`;
+	await writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf8');
+}
 async function processVod(job: VodJob): Promise<void> {
 	const sourceId = parseSourceId(job.url);
 	const workDir = `${dataDir}/${sourceId}-${Date.now()}`;
@@ -565,70 +982,220 @@ async function processVod(job: VodJob): Promise<void> {
 	updateUploadHistoryStatus(job.id, 'metadata');
 	const metadata = await loadVodMetadata(job.url);
 	updateUploadHistoryContext(job.id, { streamTitle: metadata.streamTitle });
+	await saveVodMetadataSnapshot(workDir, metadata);
 	const chunkBaseName = sanitizeFileName(metadata.streamTitle);
 	const chunksPattern = `${workDir}/${chunkBaseName}_%03d.mp4`;
 
 	await setStateAndNotify(job, 'downloading');
 	updateUploadHistoryStatus(job.id, 'downloading');
-	await runCommand(
-		[
-			downloaderBinary,
-			'--no-warnings',
-			'--no-progress',
-			'-f',
-			'best[ext=mp4]/best',
-			'-o',
-			sourceFile,
-			job.url
-		],
-		'download'
-	);
+	await downloadVodWithProgress(job, sourceFile);
 
 	const sourceStat = await stat(sourceFile);
 	const durationSeconds = parseDurationStringToSeconds(metadata.durationText);
-	const effectiveSegmentSeconds = resolveSegmentSecondsBySize(
+	let effectiveSegmentSeconds = resolveSegmentSecondsBySize(
 		sourceStat.size,
 		durationSeconds
 	);
+	let sliceMode: SliceMode = 'copy';
+	let uploadCompleted = false;
+	const minAllowedSegmentSeconds = resolveMinSegmentSeconds();
+	const maxAttempts = resolveMaxAdaptiveSliceAttempts();
 
-	await setStateAndNotify(job, 'slicing');
-	updateUploadHistoryStatus(job.id, 'slicing');
-	await runCommand(
-		[
-			'ffmpeg',
-			'-y',
-			'-i',
+	for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+		await removeGeneratedChunks(workDir, chunkBaseName);
+
+		await setStateAndNotify(job, 'slicing');
+		updateUploadHistoryStatus(job.id, 'slicing');
+		await setStateAndNotify(
+			job,
+			'slicing',
+			undefined,
+			progressWithinStage('slicing', (attempt - 1) / maxAttempts)
+		);
+		await sliceChunksWithProgress(
 			sourceFile,
-			'-c',
-			'copy',
-			'-map',
-			'0',
-			'-f',
-			'segment',
-			'-segment_format_options',
-			'movflags=+faststart',
-			'-segment_time',
-			String(effectiveSegmentSeconds),
-			'-reset_timestamps',
-			'1',
-			chunksPattern
-		],
-		'slicing'
-	);
+			chunksPattern,
+			effectiveSegmentSeconds,
+			sliceMode,
+			durationSeconds,
+			async ratio => {
+				const combinedRatio = ((attempt - 1) + ratio) / maxAttempts;
+				await setStateAndNotify(
+					job,
+					'slicing',
+					undefined,
+					progressWithinStage('slicing', combinedRatio)
+				);
+			}
+		);
+		await setStateAndNotify(
+			job,
+			'slicing',
+			undefined,
+			progressWithinStage('slicing', attempt / maxAttempts)
+		);
 
-	await setStateAndNotify(job, 'uploading');
-	updateUploadHistoryStatus(job.id, 'uploading');
-	await uploadChunks(
-		workDir,
-		metadata,
-		job.targetChatId,
-		chunkBaseName,
-		async (uploadedCount, totalCount) => {
-			const ratio = totalCount > 0 ? uploadedCount / totalCount : 0;
-			const percent = 85 + Math.floor(ratio * 14);
-			await setStateAndNotify(job, 'uploading', undefined, percent);
+		const chunkInspection = await inspectGeneratedChunks(
+			workDir,
+			chunkBaseName,
+			resolveTelegramUploadLimitBytes()
+		);
+		log.info('Chunk inspection after slicing', {
+			jobId: job.id,
+			attempt,
+			sliceMode,
+			effectiveSegmentSeconds,
+			chunkCount: chunkInspection.count,
+			largestChunkPath: chunkInspection.largestPath,
+			largestChunkBytes: chunkInspection.largestSizeBytes
+		});
+		if (chunkInspection.oversizedPath) {
+			if (sliceMode === 'copy') {
+				log.warn('Copy slicing produced oversized chunk, retrying with re-encode mode', {
+					jobId: job.id,
+					attempt,
+					effectiveSegmentSeconds,
+					chunkFilePath: chunkInspection.oversizedPath,
+					overSizedChunkBytes: chunkInspection.oversizedSizeBytes
+				});
+				sliceMode = 'reencode';
+				continue;
+			}
+
+			if (attempt >= maxAttempts || effectiveSegmentSeconds <= minAllowedSegmentSeconds) {
+				throw new ChunkTooLargeError(
+					chunkInspection.oversizedPath,
+					chunkInspection.oversizedSizeBytes
+				);
+			}
+
+			const nextSegmentSeconds = resolveNextSegmentSeconds(
+				effectiveSegmentSeconds,
+				chunkInspection.oversizedSizeBytes
+			);
+			if (nextSegmentSeconds >= effectiveSegmentSeconds) {
+				throw new ChunkTooLargeError(
+					chunkInspection.oversizedPath,
+					chunkInspection.oversizedSizeBytes
+				);
+			}
+
+			log.warn('Chunk too large after slicing, retrying with smaller segment size', {
+				jobId: job.id,
+				attempt,
+				sliceMode,
+				currentSegmentSeconds: effectiveSegmentSeconds,
+				nextSegmentSeconds,
+				chunkFilePath: chunkInspection.oversizedPath,
+				overSizedChunkBytes: chunkInspection.oversizedSizeBytes
+			});
+			effectiveSegmentSeconds = nextSegmentSeconds;
+			continue;
 		}
-	);
+
+		await setStateAndNotify(job, 'uploading');
+		updateUploadHistoryStatus(job.id, 'uploading');
+		log.info('Starting Telegram publish attempt', {
+			jobId: job.id,
+			attempt,
+			maxAttempts,
+			sliceMode,
+			effectiveSegmentSeconds,
+			targetChatId: job.targetChatId,
+			workDir,
+			chunkBaseName
+		});
+		try {
+			let lastUploadProgress: UploadProgress | undefined;
+			await uploadChunks(
+				workDir,
+				metadata,
+				job.targetChatId,
+				chunkBaseName,
+				async (progress: UploadProgress) => {
+					lastUploadProgress = progress;
+					const ratio = progress.totalBytes > 0 ? progress.uploadedBytes / progress.totalBytes : 0;
+					const percent = progressWithinStage('uploading', ratio);
+					await setStateAndNotify(job, 'uploading', undefined, percent);
+				}
+			);
+			uploadCompleted = true;
+			const totalUploadedBytes =
+				lastUploadProgress?.totalBytes ?? sourceStat.size;
+			job.publishSummary = [
+				`${chunkInspection.count} файлов`,
+				`объем ${formatBytes(totalUploadedBytes)}`,
+				`попытка ${attempt}/${maxAttempts}`,
+				`режим ${sliceMode}`,
+				`сегмент ${effectiveSegmentSeconds}с`
+			].join(', ');
+			log.info('Telegram publish attempt succeeded', {
+				jobId: job.id,
+				attempt,
+				sliceMode,
+				effectiveSegmentSeconds
+			});
+			break;
+		} catch (error) {
+			log.warn('Telegram publish attempt failed', {
+				jobId: job.id,
+				attempt,
+				sliceMode,
+				effectiveSegmentSeconds,
+				error: formatUnknownError(error)
+			});
+			if (!(error instanceof ChunkTooLargeError)) {
+				throw error;
+			}
+
+			if (sliceMode === 'copy') {
+				log.warn('Upload rejected copy-sliced chunk, retrying with re-encode mode', {
+					jobId: job.id,
+					attempt,
+					effectiveSegmentSeconds,
+					chunkFilePath: error.filePath
+				});
+				sliceMode = 'reencode';
+				continue;
+			}
+
+			if (attempt >= maxAttempts || effectiveSegmentSeconds <= minAllowedSegmentSeconds) {
+				throw error;
+			}
+
+			let overSizedChunkBytes = error.sizeBytes;
+			if (!overSizedChunkBytes) {
+				try {
+					const info = await stat(error.filePath);
+					overSizedChunkBytes = info.size;
+				} catch {
+					overSizedChunkBytes = undefined;
+				}
+			}
+
+			const nextSegmentSeconds = resolveNextSegmentSeconds(
+				effectiveSegmentSeconds,
+				overSizedChunkBytes
+			);
+			if (nextSegmentSeconds >= effectiveSegmentSeconds) {
+				throw error;
+			}
+
+			log.warn('Chunk too large, retrying with smaller segment size', {
+				jobId: job.id,
+				attempt,
+				sliceMode,
+				currentSegmentSeconds: effectiveSegmentSeconds,
+				nextSegmentSeconds,
+				chunkFilePath: error.filePath,
+				overSizedChunkBytes
+			});
+			effectiveSegmentSeconds = nextSegmentSeconds;
+		}
+	}
+	if (!uploadCompleted) {
+		throw new Error(`Telegram publish did not complete for job ${job.id} after ${maxAttempts} attempts`);
+	}
 	await sleep(cleanupDelayMs);
 	await rm(workDir, { recursive: true, force: true });
 	log.info('Work directory removed after successful upload', {
@@ -653,7 +1220,7 @@ export function enqueueVod(
 		requestedByChatId,
 		targetChatId,
 		state: 'queued',
-		progress: progressForState('queued'),
+		progress: defaultProgressForState('queued'),
 		createdAt: Date.now(),
 		updatedAt: Date.now()
 	};

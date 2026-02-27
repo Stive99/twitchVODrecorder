@@ -11,6 +11,7 @@ export function createStartCommand(): BotCommand {
 					'Команды:',
 					'/start - старт и помощь',
 					'/vod <url> - скачать и нарезать Twitch VOD',
+					'/info <url> - показать metadata для VOD/clip',
 					'/status - статус задач',
 					'/channels - чаты/каналы, где бот активен',
 					'/streams - показать файлы и папки'

@@ -1,6 +1,6 @@
 ﻿{
 	"name": "twitchvodrecorder",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"module": "src/bot.ts",
 	"type": "module",
 	"private": true,
@@ -8,7 +8,13 @@
 		"dev": "bun --watch src/bot.ts",
 		"start": "bun src/bot.ts",
 		"lint": "eslint . --ext .ts,.mts,.cts,.js,.mjs,.cjs --max-warnings 0",
-		"lint:fix": "eslint . --ext .ts,.mts,.cts,.js,.mjs,.cjs --fix"
+		"lint:fix": "eslint . --ext .ts,.mts,.cts,.js,.mjs,.cjs --fix",
+		"botapi:docker:up": "docker compose --profile botapi up -d botapi",
+		"botapi:docker:up:all": "docker compose --profile botapi up -d --build",
+		"botapi:docker:down": "docker compose --profile botapi down",
+		"botapi:docker:logs": "docker compose --profile botapi logs -f botapi",
+		"botapi:local:ps1": "powershell -NoProfile -ExecutionPolicy Bypass -File ./start-local-bot-api.ps1",
+		"botapi:local:sh": "bash ./start-local-bot-api.sh"
 	},
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",
@@ -22,7 +28,7 @@
 		"@grammyjs/runner": "^2.0.3",
 		"@grammyjs/transformer-throttler": "^1.2.1",
 		"dotenv": "^17.3.1",
-		"grammy": "^1.40.0"
+		"grammy": "^1.40.1"
 	},
 	"peerDependencies": {
 		"typescript": "^5"

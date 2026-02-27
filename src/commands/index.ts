@@ -1,6 +1,7 @@
 ﻿import type { Bot } from 'grammy';
 import { createChannelsCommand } from './channels';
 import { createHistoryCommand } from './history';
+import { createInfoCommand } from './info';
 import { createStartCommand } from './start';
 import { createStatusCommand } from './status';
 import { createStreamsCommand, registerStreamsCallbacks } from './streams';
@@ -15,6 +16,7 @@ export function setupCommands(bot: Bot, deps: CommandDependencies): void {
 		createStatusCommand(deps),
 		createHistoryCommand(),
 		createChannelsCommand(deps),
+		createInfoCommand(),
 		createStreamsCommand()
 	]);
 	registerStreamsCallbacks(bot);

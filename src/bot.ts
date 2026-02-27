@@ -1,4 +1,4 @@
-import { limit } from '@grammyjs/ratelimiter';
+﻿import { limit } from '@grammyjs/ratelimiter';
 import { run } from '@grammyjs/runner';
 import type { Context } from 'grammy';
 import { getKnownChatsText, initKnownChats, rememberChat } from './chats';
@@ -6,7 +6,8 @@ import { setupCommands } from './commands';
 import { bot, DEFAULT_TARGET_CHAT_ID, OWNER_USER_ID } from './config';
 import { logger } from './logger';
 import { runStartupPreflight } from './preflight';
-import { enqueueVod, extractVodUrl, getStatusText } from './vod';
+import { enqueueVod, getStatusText } from './vodQueue';
+import { extractVodUrl } from './vodJobUtils';
 
 const log = logger.init('bot');
 
@@ -158,8 +159,7 @@ bot.on('message:text', async ctx => {
 	try {
 		await ctx.reply(
 			[
-				`🎬 VOD добавлен в очередь: ${job.jobId}`,
-				'Статус будет обновляться в одном сообщении.'
+				`🎬 VOD добавлен в очередь: ${job.jobId}`
 			].join('\n')
 		);
 	} finally {
@@ -176,6 +176,7 @@ bot.on('channel_post:text', async ctx => {
 await bot.api.setMyCommands([
 	{ command: 'start', description: 'Старт и помощь' },
 	{ command: 'vod', description: 'Скачать VOD по ссылке' },
+	{ command: 'info', description: 'Показать metadata VOD/clip' },
 	{ command: 'status', description: 'Статус задач' },
 	{ command: 'history', description: 'История загрузок из SQLite' },
 	{ command: 'channels', description: 'Список каналов' },

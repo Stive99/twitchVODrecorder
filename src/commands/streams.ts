@@ -5,10 +5,11 @@ import { DEFAULT_TARGET_CHAT_ID, OWNER_USER_ID } from '../config';
 import { getDirectoryHistory } from '../history';
 import { logger } from '../logger';
 import {
-	type UploadFileDescriptor,
-	type UploadMetadata,
-	uploadVideoFiles
-} from '../upload';
+	createFallbackUploadMetadata,
+	isUploadMetadata
+} from '../uploadMetadata';
+import { uploadVideoFiles } from '../uploadTransport';
+import type { UploadFileDescriptor, UploadMetadata } from '../uploadTypes';
 import type { BotCommand } from './types';
 
 const log = logger.init('streams');
@@ -175,47 +176,10 @@ function buildUploadText(progress: UploadStatus): string {
 	return lines.join('\n');
 }
 
-function toFallbackMetadata(absoluteDirPath: string): UploadMetadata {
+function buildFallbackMetadataForDirectory(absoluteDirPath: string): UploadMetadata {
 	const history = getDirectoryHistory(absoluteDirPath);
 	const title = history?.streamTitle?.trim() || basename(absoluteDirPath);
-	return {
-		streamTitle: title,
-		streamDate: undefined,
-		channel: 'Unknown',
-		channelUrl: undefined,
-		durationText: 'Unknown',
-		titles: [{ title, category: 'Unknown' }],
-		vodUrl: 'https://twitch.tv/'
-	};
-}
-
-function isUploadMetadata(value: unknown): value is UploadMetadata {
-	if (!value || typeof value !== 'object') {
-		return false;
-	}
-	const data = value as Partial<UploadMetadata>;
-	if (typeof data.streamTitle !== 'string') {
-		return false;
-	}
-	if (typeof data.channel !== 'string') {
-		return false;
-	}
-	if (typeof data.durationText !== 'string') {
-		return false;
-	}
-	if (typeof data.vodUrl !== 'string') {
-		return false;
-	}
-	if (!Array.isArray(data.titles)) {
-		return false;
-	}
-	return data.titles.every(item => {
-		if (!item || typeof item !== 'object') {
-			return false;
-		}
-		const titleItem = item as { title?: unknown; category?: unknown };
-		return typeof titleItem.title === 'string' && typeof titleItem.category === 'string';
-	});
+	return createFallbackUploadMetadata(title);
 }
 
 async function buildMetadataFromDirectory(absoluteDirPath: string): Promise<UploadMetadata> {
@@ -234,7 +198,7 @@ async function buildMetadataFromDirectory(absoluteDirPath: string): Promise<Uplo
 			error: message
 		});
 	}
-	return toFallbackMetadata(absoluteDirPath);
+	return buildFallbackMetadataForDirectory(absoluteDirPath);
 }
 
 async function listDirectory(absolutePath: string): Promise<BrowserEntry[]> {

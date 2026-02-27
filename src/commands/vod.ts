@@ -31,8 +31,7 @@ export function createVodCommand(deps: CommandDependencies): BotCommand {
 			try {
 				await ctx.reply(
 					[
-						`🎬 Задача создана: ${job.jobId}`,
-						'Статус будет обновляться в одном сообщении ниже.'
+						`🎬 Задача создана: ${job.jobId}`
 					].join('\n')
 				);
 			} finally {

@@ -1,4 +1,19 @@
 ﻿services:
+  botapi:
+    image: aiogram/telegram-bot-api:latest
+    container_name: telegram-local-bot-api
+    restart: unless-stopped
+    profiles:
+      - botapi
+    ports:
+      - "8081:8081"
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: 1
+    volumes:
+      - botapi_data:/var/lib/telegram-bot-api
+
   app:
     build:
       context: .
@@ -13,4 +28,5 @@
       - streams_data:/data/streams
 
 volumes:
+  botapi_data:
   streams_data:

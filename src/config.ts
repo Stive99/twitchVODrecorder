@@ -1,12 +1,13 @@
-import { autoRetry } from '@grammyjs/auto-retry';
+﻿import { autoRetry } from '@grammyjs/auto-retry';
 import { apiThrottler } from '@grammyjs/transformer-throttler';
 import dotenv from 'dotenv';
 import { Bot } from 'grammy';
 import { logger } from './logger';
+import { requireLocalBotApiRoot } from './uploadConfig';
 
 dotenv.config();
 
-const apiRoot = process.env.BOT_API_ROOT?.trim() || undefined;
+const apiRoot = requireLocalBotApiRoot();
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
 	logger.error('TELEGRAM_BOT_TOKEN is not set in environment variables');
@@ -45,7 +46,7 @@ const throttlerMaxConcurrent = parsePositiveInt(
 );
 
 export const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN, {
-	client: apiRoot ? { apiRoot } : undefined
+	client: { apiRoot }
 });
 bot.api.config.use(
 	autoRetry({

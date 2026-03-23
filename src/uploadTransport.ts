@@ -1,5 +1,5 @@
 import { readFile, stat, writeFile } from 'node:fs/promises';
-import { GrammyError, HttpError, InputFile, InputMediaBuilder } from 'grammy';
+import { GrammyError, HttpError, InputFile } from 'grammy';
 import { bot } from './config';
 import { logger } from './logger';
 import {
@@ -19,6 +19,7 @@ import {
 } from './uploadConfig';
 import { ChunkTooLargeError, formatUnknownError, isRequestEntityTooLarge } from './uploadErrors';
 import { buildFinalPostText, buildUploadCaption } from './uploadFormatting';
+import { prepareTelegramVideoFile } from './uploadVideoPrep';
 import { normalizeTargetChatId, prepareUploadFiles, validateUploadMetadata } from './uploadValidation';
 import type {
 	NormalizedUploadFile,
@@ -37,6 +38,7 @@ interface UploadCheckpointState {
 
 interface UploadSessionOptions {
 	checkpointFilePath?: string;
+	finalPostChatId?: string | number;
 	telemetry?: UploadTelemetryHooks;
 }
 
@@ -245,104 +247,116 @@ export async function uploadVideoFiles(
 			fileIndex: index + 1,
 			totalFiles: files.length
 		});
-		const media = InputMediaBuilder.video(
-			new InputFile(filePath),
-			index === 0
-				? { caption, parse_mode: 'HTML', supports_streaming: true }
-				: { supports_streaming: true }
-		);
-		for (let attempt = 1; ; attempt += 1) {
-			const sendStartedAt = Date.now();
-			const startBytes = uploadedBytes;
-			const startFiles = uploadedFiles;
-			const timer = onProgress
-				? setInterval(() => {
-					const elapsed = Date.now() - sendStartedAt;
-					const ratio = Math.min(0.95, elapsed / uploadHeartbeatWindowMs);
-					const optimisticBytes = Math.min(
-						startBytes + file.sizeBytes - 1,
-						startBytes + Math.floor(file.sizeBytes * ratio)
-					);
-					if (optimisticBytes <= uploadedBytes) {
-						return;
+		const preparedVideo = await prepareTelegramVideoFile(filePath, file.sizeBytes);
+		try {
+			for (let attempt = 1; ; attempt += 1) {
+				const sendStartedAt = Date.now();
+				const startBytes = uploadedBytes;
+				const startFiles = uploadedFiles;
+				const timer = onProgress
+					? setInterval(() => {
+						const elapsed = Date.now() - sendStartedAt;
+						const ratio = Math.min(0.95, elapsed / uploadHeartbeatWindowMs);
+						const optimisticBytes = Math.min(
+							startBytes + file.sizeBytes - 1,
+							startBytes + Math.floor(file.sizeBytes * ratio)
+						);
+						if (optimisticBytes <= uploadedBytes) {
+							return;
+						}
+						const progressPromise = emitProgress({
+							uploadedBytes: optimisticBytes,
+							totalBytes,
+							uploadedFiles: startFiles,
+							totalFiles: files.length
+						});
+						progressPromise.catch(progressError => {
+							log.warn('Failed to emit upload heartbeat progress', {
+								filePath,
+								error:
+									progressError instanceof Error
+										? progressError.message
+										: String(progressError)
+							});
+						});
+					}, uploadHeartbeatIntervalMs)
+					: undefined;
+				try {
+					const message = await bot.api.sendVideo(normalizedTargetChatId, new InputFile(filePath), {
+						supports_streaming: true,
+						...(index === 0 ? { caption, parse_mode: 'HTML' as const } : {}),
+						...(preparedVideo.durationSeconds
+							? { duration: preparedVideo.durationSeconds }
+							: {}),
+						...(preparedVideo.width ? { width: preparedVideo.width } : {}),
+						...(preparedVideo.height ? { height: preparedVideo.height } : {}),
+						...(preparedVideo.thumbnailPath
+							? { thumbnail: new InputFile(preparedVideo.thumbnailPath) }
+							: {})
+					});
+					const messageId = resolveMessageId(message?.message_id, `sendVideo ${filePath}`);
+					if (timer) {
+						clearInterval(timer);
 					}
-					const progressPromise = emitProgress({
-						uploadedBytes: optimisticBytes,
+					uploadedBytes += file.sizeBytes;
+					uploadedFiles += 1;
+					await markFileUploaded(filePath, messageId);
+					await emitProgress({
+						uploadedBytes,
 						totalBytes,
-						uploadedFiles: startFiles,
+						uploadedFiles,
 						totalFiles: files.length
 					});
-					progressPromise.catch(progressError => {
-						log.warn('Failed to emit upload heartbeat progress', {
-							filePath,
-							error:
-								progressError instanceof Error
-									? progressError.message
-									: String(progressError)
-						});
-					});
-				}, uploadHeartbeatIntervalMs)
-				: undefined;
-			try {
-				const message = await bot.api.sendVideo(normalizedTargetChatId, media.media, media);
-				const messageId = resolveMessageId(message?.message_id, `sendVideo ${filePath}`);
-				if (timer) {
-					clearInterval(timer);
-				}
-				uploadedBytes += file.sizeBytes;
-				uploadedFiles += 1;
-				await markFileUploaded(filePath, messageId);
-				await emitProgress({
-					uploadedBytes,
-					totalBytes,
-					uploadedFiles,
-					totalFiles: files.length
-				});
-				log.info('File uploaded successfully', {
-					sessionId,
-					filePath,
-					fileIndex: index + 1,
-					totalFiles: files.length,
-					attempt,
-					messageId
-				});
-				break;
-			} catch (error) {
-				if (timer) {
-					clearInterval(timer);
-				}
-				if (isRequestEntityTooLarge(error)) {
-					options?.telemetry?.onEntityTooLarge?.({ stage: 'single' });
-					log.error('Telegram rejected file upload with entity too large', {
+					log.info('File uploaded successfully', {
 						sessionId,
 						filePath,
-						fileSizeBytes: file.sizeBytes,
-						configuredEffectiveLimitBytes: maxUploadBytes,
-						fileWithinConfiguredLimit: file.sizeBytes <= maxUploadBytes,
-						error: formatUnknownError(error)
+						fileIndex: index + 1,
+						totalFiles: files.length,
+						attempt,
+						messageId,
+						durationSeconds: preparedVideo.durationSeconds,
+						hasThumbnail: Boolean(preparedVideo.thumbnailPath)
 					});
-					throw new ChunkTooLargeError(filePath, undefined, { cause: error });
-				}
-				const retryDelayMs = resolveRetryDelayMs(error, attempt);
-				if (!retryDelayMs) {
-					log.error('File upload failed without retry', {
+					break;
+				} catch (error) {
+					if (timer) {
+						clearInterval(timer);
+					}
+					if (isRequestEntityTooLarge(error)) {
+						options?.telemetry?.onEntityTooLarge?.({ stage: 'single' });
+						log.error('Telegram rejected file upload with entity too large', {
+							sessionId,
+							filePath,
+							fileSizeBytes: file.sizeBytes,
+							configuredEffectiveLimitBytes: maxUploadBytes,
+							fileWithinConfiguredLimit: file.sizeBytes <= maxUploadBytes,
+							error: formatUnknownError(error)
+						});
+						throw new ChunkTooLargeError(filePath, undefined, { cause: error });
+					}
+					const retryDelayMs = resolveRetryDelayMs(error, attempt);
+					if (!retryDelayMs) {
+						log.error('File upload failed without retry', {
+							sessionId,
+							filePath,
+							attempt,
+							error: formatUnknownError(error)
+						});
+						throw error;
+					}
+					options?.telemetry?.onRetry?.({ stage: 'single', attempt });
+					log.warn('Retrying Telegram upload after transient API error', {
 						sessionId,
 						filePath,
 						attempt,
-						error: formatUnknownError(error)
+						retryDelayMs,
+						error: error instanceof Error ? error.message : String(error)
 					});
-					throw error;
+					await sleep(retryDelayMs);
 				}
-				options?.telemetry?.onRetry?.({ stage: 'single', attempt });
-				log.warn('Retrying Telegram upload after transient API error', {
-					sessionId,
-					filePath,
-					attempt,
-					retryDelayMs,
-					error: error instanceof Error ? error.message : String(error)
-				});
-				await sleep(retryDelayMs);
 			}
+		} finally {
+			await preparedVideo.cleanup();
 		}
 	};
 
@@ -371,124 +385,140 @@ export async function uploadVideoFiles(
 				batchSize: batch.length,
 				batchBytes
 			});
+			const preparedBatch = await Promise.all(
+				batch.map(async entry => ({
+					entry,
+					prepared: await prepareTelegramVideoFile(entry.file.path, entry.file.sizeBytes)
+				}))
+			);
 
-			for (let attempt = 1; ; attempt += 1) {
-				const sendStartedAt = Date.now();
-				const startBytes = uploadedBytes;
-				const startFiles = uploadedFiles;
-				const timer = onProgress
-					? setInterval(() => {
-						const elapsed = Date.now() - sendStartedAt;
-						const ratio = Math.min(0.95, elapsed / uploadHeartbeatWindowMs);
-						const optimisticBytes = Math.min(
-							startBytes + batchBytes - 1,
-							startBytes + Math.floor(batchBytes * ratio)
-						);
-						if (optimisticBytes <= uploadedBytes) {
-							return;
-						}
-						const optimisticFiles = Math.min(
-							startFiles + batch.length - 1,
-							startFiles + Math.floor(batch.length * ratio)
-						);
-						const progressPromise = emitProgress({
-							uploadedBytes: optimisticBytes,
-							totalBytes,
-							uploadedFiles: optimisticFiles,
-							totalFiles: files.length
-						});
-						progressPromise.catch(progressError => {
-							log.warn('Failed to emit media-group heartbeat progress', {
-								batchStart,
-								error:
+			try {
+				for (let attempt = 1; ; attempt += 1) {
+					const sendStartedAt = Date.now();
+					const startBytes = uploadedBytes;
+					const startFiles = uploadedFiles;
+					const timer = onProgress
+						? setInterval(() => {
+							const elapsed = Date.now() - sendStartedAt;
+							const ratio = Math.min(0.95, elapsed / uploadHeartbeatWindowMs);
+							const optimisticBytes = Math.min(
+								startBytes + batchBytes - 1,
+								startBytes + Math.floor(batchBytes * ratio)
+							);
+							if (optimisticBytes <= uploadedBytes) {
+								return;
+							}
+							const optimisticFiles = Math.min(
+								startFiles + batch.length - 1,
+								startFiles + Math.floor(batch.length * ratio)
+							);
+							const progressPromise = emitProgress({
+								uploadedBytes: optimisticBytes,
+								totalBytes,
+								uploadedFiles: optimisticFiles,
+								totalFiles: files.length
+							});
+							progressPromise.catch(progressError => {
+								log.warn('Failed to emit media-group heartbeat progress', {
+									batchStart,
+									error:
 									progressError instanceof Error
 										? progressError.message
 										: String(progressError)
+								});
 							});
+						}, uploadHeartbeatIntervalMs)
+						: undefined;
+					try {
+						const media = preparedBatch.map(({ entry, prepared }) => ({
+							type: 'video' as const,
+							media: new InputFile(entry.file.path),
+							supports_streaming: true,
+							...(entry.index === 0
+								? { caption, parse_mode: 'HTML' as const }
+								: {}),
+							...(prepared.durationSeconds ? { duration: prepared.durationSeconds } : {}),
+							...(prepared.width ? { width: prepared.width } : {}),
+							...(prepared.height ? { height: prepared.height } : {}),
+							...(prepared.thumbnailPath
+								? { thumbnail: new InputFile(prepared.thumbnailPath) }
+								: {})
+						}));
+						const sentMessages = await bot.api.sendMediaGroup(normalizedTargetChatId, media);
+						const messageIds = batch.map((entry, i) =>
+							resolveMessageId(sentMessages[i]?.message_id, `sendMediaGroup ${entry.file.path}`)
+						);
+						if (timer) {
+							clearInterval(timer);
+						}
+						for (let i = 0; i < batch.length; i += 1) {
+							const entry = batch[i];
+							if (!entry) {
+								continue;
+							}
+							const messageId = messageIds[i];
+							if (!messageId) {
+								continue;
+							}
+							await markFileUploaded(entry.file.path, messageId);
+						}
+						uploadedBytes += batchBytes;
+						uploadedFiles += batch.length;
+						await emitProgress({
+							uploadedBytes,
+							totalBytes,
+							uploadedFiles,
+							totalFiles: files.length
 						});
-					}, uploadHeartbeatIntervalMs)
-					: undefined;
-				try {
-					const media = batch.map(entry => ({
-						type: 'video' as const,
-						media: new InputFile(entry.file.path),
-						supports_streaming: true,
-						...(entry.index === 0
-							? { caption, parse_mode: 'HTML' as const }
-							: {})
-					}));
-					const sentMessages = await bot.api.sendMediaGroup(normalizedTargetChatId, media);
-					const messageIds = batch.map((entry, i) =>
-						resolveMessageId(sentMessages[i]?.message_id, `sendMediaGroup ${entry.file.path}`)
-					);
-					if (timer) {
-						clearInterval(timer);
-					}
-					for (let i = 0; i < batch.length; i += 1) {
-						const entry = batch[i];
-						if (!entry) {
-							continue;
-						}
-						const messageId = messageIds[i];
-						if (!messageId) {
-							continue;
-						}
-						await markFileUploaded(entry.file.path, messageId);
-					}
-					uploadedBytes += batchBytes;
-					uploadedFiles += batch.length;
-					await emitProgress({
-						uploadedBytes,
-						totalBytes,
-						uploadedFiles,
-						totalFiles: files.length
-					});
-					log.info('Media-group batch uploaded successfully', {
-						sessionId,
-						batchStart,
-						batchEnd,
-						attempt
-					});
-					batchSent = true;
-					break;
-				} catch (error) {
-					if (timer) {
-						clearInterval(timer);
-					}
-					if (isRequestEntityTooLarge(error)) {
-						options?.telemetry?.onEntityTooLarge?.({ stage: 'group' });
-						log.warn('Media-group batch rejected as too large, will fallback to single-file mode', {
+						log.info('Media-group batch uploaded successfully', {
 							sessionId,
 							batchStart,
 							batchEnd,
-							batchBytes,
-							configuredEffectiveLimitBytes: maxUploadBytes,
-							error: formatUnknownError(error)
+							attempt
 						});
-						fallbackToSingleUpload = true;
+						batchSent = true;
 						break;
-					}
-					const retryDelayMs = resolveRetryDelayMs(error, attempt);
-					if (!retryDelayMs) {
-						log.error('Media-group batch upload failed without retry', {
+					} catch (error) {
+						if (timer) {
+							clearInterval(timer);
+						}
+						if (isRequestEntityTooLarge(error)) {
+							options?.telemetry?.onEntityTooLarge?.({ stage: 'group' });
+							log.warn('Media-group batch rejected as too large, will fallback to single-file mode', {
+								sessionId,
+								batchStart,
+								batchEnd,
+								batchBytes,
+								configuredEffectiveLimitBytes: maxUploadBytes,
+								error: formatUnknownError(error)
+							});
+							fallbackToSingleUpload = true;
+							break;
+						}
+						const retryDelayMs = resolveRetryDelayMs(error, attempt);
+						if (!retryDelayMs) {
+							log.error('Media-group batch upload failed without retry', {
+								sessionId,
+								batchStart,
+								batchEnd,
+								attempt,
+								error: formatUnknownError(error)
+							});
+							throw error;
+						}
+						options?.telemetry?.onRetry?.({ stage: 'group', attempt });
+						log.warn('Retrying media-group upload after transient API error', {
 							sessionId,
 							batchStart,
-							batchEnd,
 							attempt,
-							error: formatUnknownError(error)
+							retryDelayMs,
+							error: error instanceof Error ? error.message : String(error)
 						});
-						throw error;
+						await sleep(retryDelayMs);
 					}
-					options?.telemetry?.onRetry?.({ stage: 'group', attempt });
-					log.warn('Retrying media-group upload after transient API error', {
-						sessionId,
-						batchStart,
-						attempt,
-						retryDelayMs,
-						error: error instanceof Error ? error.message : String(error)
-					});
-					await sleep(retryDelayMs);
 				}
+			} finally {
+				await Promise.all(preparedBatch.map(item => item.prepared.cleanup()));
 			}
 
 			if (batchSent) {
@@ -518,7 +548,11 @@ export async function uploadVideoFiles(
 			await sleep(postSendDelayMs);
 		}
 		const finalPostText = buildFinalPostText(meta, files.length, totalBytes);
-		const sent = await sendFinalPost(normalizedTargetChatId, finalPostText, sessionId, options?.telemetry);
+		const finalPostChatId =
+			typeof options?.finalPostChatId === 'undefined'
+				? normalizedTargetChatId
+				: options.finalPostChatId;
+		const sent = await sendFinalPost(finalPostChatId, finalPostText, sessionId, options?.telemetry);
 		if (sent) {
 			checkpointState.finalPostSent = true;
 			await saveCheckpointState(options?.checkpointFilePath, checkpointState);
@@ -563,6 +597,7 @@ export async function uploadChunks(
 	});
 	const mergedOptions: UploadSessionOptions = {
 		checkpointFilePath: options?.checkpointFilePath ?? `${dir}/${chunkBaseName}.upload-state.json`,
+		finalPostChatId: options?.finalPostChatId,
 		telemetry: options?.telemetry
 	};
 	await uploadVideoFiles(files, meta, targetChatId, onProgress, mergedOptions);

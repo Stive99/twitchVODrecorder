@@ -38,19 +38,6 @@ export function sanitizeFileName(value: string): string {
 	return normalized.slice(0, 80);
 }
 
-function normalizeAsciiSlug(value: string): string {
-	const decomposed = value.normalize('NFKD');
-	const ascii = Array.from(decomposed)
-		.filter(ch => ch.charCodeAt(0) <= 0x7f)
-		.join('');
-	const slug = ascii
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, '-')
-		.replace(/^-+|-+$/g, '')
-		.replace(/-+/g, '-');
-	return slug;
-}
-
 function stableHashHex(value: string): string {
 	let hash = 0x811c9dc5;
 	for (let i = 0; i < value.length; i += 1) {
@@ -61,12 +48,17 @@ function stableHashHex(value: string): string {
 }
 
 export function buildChunkBaseName(streamTitle: string, sourceId: string): string {
-	const fallbackBase = normalizeAsciiSlug(sourceId) || 'stream';
-	const titleSlug = normalizeAsciiSlug(streamTitle);
-	const base = titleSlug.length > 0 ? titleSlug : fallbackBase;
-	const hash = stableHashHex(`${sourceId}|${streamTitle}`);
-	const combined = `${base}-${hash}`;
-	return sanitizeFileName(combined).slice(0, 80);
+	const safeTitle = sanitizeFileName(streamTitle);
+	if (safeTitle && safeTitle !== 'stream') {
+		return safeTitle;
+	}
+
+	const fallbackBase = sanitizeFileName(sourceId);
+	if (fallbackBase && fallbackBase !== 'stream') {
+		return fallbackBase;
+	}
+
+	return `stream-${stableHashHex(`${sourceId}|${streamTitle}`)}`;
 }
 
 export function parseSourceId(url: string): string {
@@ -230,50 +222,89 @@ function normalizeMetadataText(value: string | undefined): string | undefined {
 	return normalized.length > 0 ? normalized : undefined;
 }
 
-export function resolveStreamCategory(info: YtInfo): string {
-	const candidates: Array<string | undefined> = [
-		info.categories?.find(value => typeof value === 'string' && value.trim().length > 0),
-		info.category,
-		info.game,
-		info.genre
-	];
-	for (const candidate of candidates) {
-		const normalized = normalizeMetadataText(candidate);
-		if (normalized) {
-			return normalized;
-		}
+function appendUniqueText(target: string[], candidate: string | undefined): void {
+	const normalized = normalizeMetadataText(candidate);
+	if (!normalized) {
+		return;
 	}
-
-	const chapterCategory = info.chapters
-		?.map(chapter => normalizeMetadataText(chapter.title))
-		.find((title): title is string => typeof title === 'string');
-	if (chapterCategory) {
-		return chapterCategory;
+	if (target.some(value => value.toLowerCase() === normalized.toLowerCase())) {
+		return;
 	}
-
-	return 'Unknown';
+	target.push(normalized);
 }
 
-export function resolveStreamTitle(info: YtInfo, category: string): string {
-	const categoryLower = category.trim().toLowerCase();
-	const candidates: Array<string | undefined> = [info.title, info.fulltitle];
-	const normalizedCandidates = candidates
-		.map(normalizeMetadataText)
-		.filter((value): value is string => typeof value === 'string');
+function resolveChapterTitles(info: YtInfo): string[] {
+	const titles: string[] = [];
+	for (const chapter of info.chapters ?? []) {
+		appendUniqueText(titles, chapter.title);
+	}
+	return titles;
+}
 
-	const preferred = normalizedCandidates.find(
-		value => value.toLowerCase() !== categoryLower
-	);
-	if (preferred) {
-		return preferred;
+export function resolveStreamCategories(info: YtInfo): string[] {
+	const categories: string[] = [];
+	for (const category of info.categories ?? []) {
+		appendUniqueText(categories, category);
+	}
+	appendUniqueText(categories, info.category);
+	appendUniqueText(categories, info.game);
+	appendUniqueText(categories, info.genre);
+
+	if (categories.length > 0) {
+		return categories;
+	}
+
+	for (const chapter of info.chapters ?? []) {
+		appendUniqueText(categories, chapter.category);
+	}
+	if (categories.length > 0) {
+		return categories;
+	}
+
+	const chapterTitles = resolveChapterTitles(info);
+	return chapterTitles.length > 0 ? chapterTitles : ['Unknown'];
+}
+
+export function resolveStreamCategory(info: YtInfo): string {
+	return resolveStreamCategories(info)[0] ?? 'Unknown';
+}
+
+export function resolveStreamTitles(
+	info: YtInfo,
+	categories: readonly string[]
+): string[] {
+	const titles: string[] = [];
+	const categorySet = new Set(categories.map(category => category.trim().toLowerCase()));
+	const topLevelCandidates: Array<string | undefined> = [info.title, info.fulltitle];
+	for (const candidate of topLevelCandidates) {
+		const normalized = normalizeMetadataText(candidate);
+		if (!normalized || categorySet.has(normalized.toLowerCase())) {
+			continue;
+		}
+		appendUniqueText(titles, normalized);
 	}
 
 	const descriptionTitle = normalizeMetadataText(info.description?.split('\n')[0]);
-	if (descriptionTitle && descriptionTitle.toLowerCase() !== categoryLower) {
-		return descriptionTitle;
+	if (descriptionTitle && !categorySet.has(descriptionTitle.toLowerCase())) {
+		appendUniqueText(titles, descriptionTitle);
 	}
 
-	return normalizedCandidates[0] ?? `VOD ${info.id ?? Date.now()}`;
+	for (const chapterTitle of resolveChapterTitles(info)) {
+		if (categorySet.has(chapterTitle.toLowerCase())) {
+			continue;
+		}
+		appendUniqueText(titles, chapterTitle);
+	}
+
+	if (titles.length > 0) {
+		return titles;
+	}
+
+	return [normalizeMetadataText(info.title) ?? `VOD ${info.id ?? Date.now()}`];
+}
+
+export function resolveStreamTitle(info: YtInfo, category: string): string {
+	return resolveStreamTitles(info, [category])[0] ?? `VOD ${info.id ?? Date.now()}`;
 }
 
 export function extractVodUrl(text: string): string | null {

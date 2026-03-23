@@ -1,9 +1,15 @@
-﻿FROM oven/bun:1.2.22-alpine
+﻿FROM oven/bun:1.3.11
 
 WORKDIR /app
 
-RUN apk add --no-cache ffmpeg python3 py3-pip \
-    && pip install --no-cache-dir --break-system-packages yt-dlp
+ENV TZ=Europe/Moscow
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip tzdata \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo $TZ > /etc/timezone \
+    && pip3 install --no-cache-dir --disable-pip-version-check --break-system-packages yt-dlp \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production

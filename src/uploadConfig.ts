@@ -1,7 +1,6 @@
-const DEFAULT_TELEGRAM_UPLOAD_LIMIT_MB_STANDARD = 45;
 const DEFAULT_TELEGRAM_UPLOAD_LIMIT_MB_LOCAL = 2000;
-const DEFAULT_TELEGRAM_UPLOAD_SAFETY_RATIO_STANDARD = 0.9;
 const DEFAULT_TELEGRAM_UPLOAD_SAFETY_RATIO_LOCAL = 0.95;
+const LOCAL_BOT_API_HOSTNAMES = new Set(['botapi', 'localhost', '127.0.0.1', '::1']);
 
 export const uploadRetryAttempts = 4;
 export const uploadRetryBaseDelayMs = 1500;
@@ -15,8 +14,8 @@ export const postSendDelayMs = resolvePostSendDelayMs();
 export const sendFinalPostAfterUpload = process.env.TELEGRAM_SEND_FINAL_POST !== '0';
 
 export interface UploadLimitDiagnostics {
-	mode: 'standard' | 'local';
-	apiRoot?: string;
+	mode: 'local';
+	apiRoot: string;
 	configuredLimitMb: number;
 	effectiveLimitMb: number;
 	configuredLimitBytes: number;
@@ -29,13 +28,13 @@ function resolveApiRoot(): string | undefined {
 	return value && value.length > 0 ? value : undefined;
 }
 
-function isLikelyLocalBotApiRoot(apiRoot: string | undefined): boolean {
+export function isLikelyLocalBotApiRoot(apiRoot: string | undefined): boolean {
 	if (!apiRoot) {
 		return false;
 	}
 	try {
 		const host = new URL(apiRoot).hostname.toLowerCase();
-		if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
+		if (LOCAL_BOT_API_HOSTNAMES.has(host)) {
 			return true;
 		}
 		if (host.startsWith('10.')) {
@@ -57,18 +56,29 @@ function isLikelyLocalBotApiRoot(apiRoot: string | undefined): boolean {
 	}
 }
 
-function resolveDefaultLimitMb(): number {
+export function requireLocalBotApiRoot(): string {
 	const apiRoot = resolveApiRoot();
-	return isLikelyLocalBotApiRoot(apiRoot)
-		? DEFAULT_TELEGRAM_UPLOAD_LIMIT_MB_LOCAL
-		: DEFAULT_TELEGRAM_UPLOAD_LIMIT_MB_STANDARD;
+	if (!apiRoot) {
+		throw new Error(
+			'BOT_API_ROOT is required. This bot only supports Local Bot API. Use http://localhost:8081 on host or http://botapi:8081 in docker-compose.'
+		);
+	}
+	if (!isLikelyLocalBotApiRoot(apiRoot)) {
+		throw new Error(
+			`BOT_API_ROOT must point to a Local Bot API endpoint. Received: ${apiRoot}`
+		);
+	}
+	return apiRoot;
+}
+
+function resolveDefaultLimitMb(): number {
+	requireLocalBotApiRoot();
+	return DEFAULT_TELEGRAM_UPLOAD_LIMIT_MB_LOCAL;
 }
 
 function resolveDefaultSafetyRatio(): number {
-	const apiRoot = resolveApiRoot();
-	return isLikelyLocalBotApiRoot(apiRoot)
-		? DEFAULT_TELEGRAM_UPLOAD_SAFETY_RATIO_LOCAL
-		: DEFAULT_TELEGRAM_UPLOAD_SAFETY_RATIO_STANDARD;
+	requireLocalBotApiRoot();
+	return DEFAULT_TELEGRAM_UPLOAD_SAFETY_RATIO_LOCAL;
 }
 
 export function resolveTelegramUploadLimitBytes(): number {
@@ -99,8 +109,7 @@ export function resolveTelegramEffectiveUploadLimitBytes(): number {
 }
 
 export function resolveUploadLimitDiagnostics(): UploadLimitDiagnostics {
-	const apiRoot = resolveApiRoot();
-	const mode = isLikelyLocalBotApiRoot(apiRoot) ? 'local' : 'standard';
+	const apiRoot = requireLocalBotApiRoot();
 	const configuredLimitBytes = resolveTelegramUploadLimitBytes();
 	const effectiveLimitBytes = resolveTelegramEffectiveUploadLimitBytes();
 	const safetyRatio = configuredLimitBytes > 0
@@ -108,7 +117,7 @@ export function resolveUploadLimitDiagnostics(): UploadLimitDiagnostics {
 		: resolveDefaultSafetyRatio();
 
 	return {
-		mode,
+		mode: 'local',
 		apiRoot,
 		configuredLimitMb: configuredLimitBytes / (1024 * 1024),
 		effectiveLimitMb: effectiveLimitBytes / (1024 * 1024),

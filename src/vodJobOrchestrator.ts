@@ -123,6 +123,7 @@ export async function processVod(job: VodJob): Promise<void> {
 						await setStateAndNotify(job, 'uploading', undefined, percent);
 					},
 					{
+						finalPostChatId: job.requestedByChatId,
 						telemetry: {
 							onEntityTooLarge: () => {
 								metrics.recordEntityTooLarge();
@@ -341,6 +342,7 @@ export async function processVod(job: VodJob): Promise<void> {
 						await setStateAndNotify(job, 'uploading', undefined, percent);
 					},
 					{
+						finalPostChatId: job.requestedByChatId,
 						telemetry: {
 							onRetry: () => {
 								metrics.recordUploadRetry();
@@ -463,3 +465,4 @@ export async function processVod(job: VodJob): Promise<void> {
 		metrics.finalize(success);
 	}
 }
+

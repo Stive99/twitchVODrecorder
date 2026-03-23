@@ -5,8 +5,8 @@ import {
 	resolveChannelName,
 	resolveChannelUrl,
 	resolveDurationSeconds,
-	resolveStreamCategory,
-	resolveStreamTitle,
+	resolveStreamCategories,
+	resolveStreamTitles,
 	toHms
 } from './vodJobUtils';
 
@@ -15,8 +15,17 @@ export function buildUploadMetadataFromYtInfo(
 	url: string
 ): UploadMetadata {
 	const durationSeconds = resolveDurationSeconds(ytInfo);
-	const category = resolveStreamCategory(ytInfo);
-	const streamTitle = resolveStreamTitle(ytInfo, category);
+	const categories = resolveStreamCategories(ytInfo);
+	const titles = resolveStreamTitles(ytInfo, categories);
+	const primaryCategory = categories[0] ?? 'Unknown';
+	const streamTitle = titles[0] ?? `VOD ${ytInfo.id ?? Date.now()}`;
+	const metadataItems = Array.from(
+		{ length: Math.max(titles.length, categories.length, 1) },
+		(_, index) => ({
+			title: titles[index] ?? streamTitle,
+			category: categories[index] ?? primaryCategory
+		})
+	);
 
 	return {
 		streamTitle,
@@ -25,7 +34,7 @@ export function buildUploadMetadataFromYtInfo(
 		channelUrl: resolveChannelUrl(ytInfo),
 		durationText:
 			typeof durationSeconds === 'number' ? toHms(durationSeconds) : 'Unknown',
-		titles: [{ title: streamTitle, category }],
+		titles: metadataItems,
 		vodUrl: url
 	};
 }

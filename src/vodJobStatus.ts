@@ -211,12 +211,6 @@ export async function setStateAndNotify(
 	if (text === job.lastStatusText) {
 		return;
 	}
-	log.info('Job state updated', {
-		jobId: job.id,
-		state,
-		progress: job.progress,
-		hasError: Boolean(error)
-	});
 
 	try {
 		if (job.statusMessageId) {

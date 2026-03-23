@@ -28,7 +28,7 @@ export function createInfoCommand(): BotCommand {
 					`<b>vod-metadata.json</b>\n<pre>${escapeHtml(JSON.stringify(metadata, null, 2))}</pre>`,
 					{ parse_mode: 'HTML' }
 				);
-				await ctx.reply(`<b>Post preview</b>\n\n${buildUploadCaption(metadata)}`, {
+				await ctx.reply(`<b>Post preview</b>\n${buildUploadCaption(metadata)}`, {
 					parse_mode: 'HTML',
 					link_preview_options: { is_disabled: true }
 				});

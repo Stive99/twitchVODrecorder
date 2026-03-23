@@ -44,7 +44,12 @@ export interface YtInfo {
 	duration?: number;
 	duration_string?: string;
 	categories?: string[];
-	chapters?: Array<{ title?: string; start_time?: number }>;
+	chapters?: Array<{
+		title?: string;
+		category?: string;
+		start_time?: number;
+		end_time?: number;
+	}>;
 	timestamp?: number;
 	release_timestamp?: number;
 	upload_date?: string;

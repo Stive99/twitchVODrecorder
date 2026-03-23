@@ -1,9 +1,10 @@
-﻿import { access, mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Bot } from 'grammy';
 import { logger } from './logger';
+import { requireLocalBotApiRoot, resolveUploadLimitDiagnostics } from './uploadConfig';
 
 const log = logger.init('preflight');
 
@@ -36,7 +37,6 @@ async function assertExecutableAvailable(
 		if (Bun.which(candidate)) {
 			return candidate;
 		}
-		// Support absolute/relative paths passed via env var.
 		try {
 			await access(candidate, constants.X_OK);
 			return candidate;
@@ -64,7 +64,9 @@ export async function runStartupPreflight(
 ): Promise<void> {
 	log.info('Running startup checks');
 
-	// Verify bot token and API availability early.
+	const apiRoot = requireLocalBotApiRoot();
+	const uploadLimitDiagnostics = resolveUploadLimitDiagnostics();
+
 	await bot.api.getMe();
 
 	const dataDir = resolveDataDir();
@@ -73,7 +75,6 @@ export async function runStartupPreflight(
 	const sqliteDbPath = resolveSqliteDbPath(dataDir);
 	await assertDirectoryWritable(dirname(sqliteDbPath));
 
-	// Check temp directory write access because Bun/FFmpeg may rely on it.
 	await assertDirectoryWritable(tmpdir());
 
 	await assertExecutableAvailable('yt-dlp', [
@@ -82,20 +83,24 @@ export async function runStartupPreflight(
 		'yt-dlp'
 	]);
 	await assertExecutableAvailable('ffmpeg', ['ffmpeg']);
+	await assertExecutableAvailable('ffprobe', ['ffprobe']);
 
 	assertPositiveNumberEnv('VOD_SEGMENT_SECONDS');
 	assertPositiveNumberEnv('BOT_API_RETRY_MAX_ATTEMPTS');
 	assertPositiveNumberEnv('BOT_API_MAX_CONCURRENT');
 	assertPositiveNumberEnv('BOT_RATE_LIMIT_WINDOW_MS');
 	assertPositiveNumberEnv('BOT_RATE_LIMIT_REQUESTS');
+	assertPositiveNumberEnv('TELEGRAM_UPLOAD_LIMIT_MB');
 
 	if (targetChatId?.trim()) {
 		await bot.api.getChat(targetChatId.trim());
 	}
 
 	log.info('Startup checks passed', {
+		apiRoot,
 		dataDir,
 		sqliteDbPath,
-		targetChatId: targetChatId?.trim() || 'not set'
+		targetChatId: targetChatId?.trim() || 'not set',
+		uploadLimitDiagnostics
 	});
 }

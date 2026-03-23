@@ -1,18 +1,20 @@
-﻿services:
+services:
   botapi:
-    image: aiogram/telegram-bot-api:latest
+    image: aiogram/telegram-bot-api:9.5
     container_name: telegram-local-bot-api
     restart: unless-stopped
-    profiles:
-      - botapi
     ports:
       - "8081:8081"
     environment:
       TELEGRAM_API_ID: ${TELEGRAM_API_ID}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
       TELEGRAM_LOCAL: 1
+      TZ: Europe/Moscow
     volumes:
-      - botapi_data:/var/lib/telegram-bot-api
+      - ./storage/botapi:/var/lib/telegram-bot-api
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
 
   app:
     build:
@@ -20,13 +22,17 @@
       dockerfile: Dockerfile
     container_name: twitch-vod-recorder
     restart: unless-stopped
+    init: true
+    depends_on:
+      - botapi
     env_file:
       - .env
     environment:
+      BOT_API_ROOT: http://botapi:8081
       DATA_DIR: /data/streams
+      TZ: Europe/Moscow
     volumes:
-      - streams_data:/data/streams
-
-volumes:
-  botapi_data:
-  streams_data:
+      - ./storage/streams:/data/streams
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
